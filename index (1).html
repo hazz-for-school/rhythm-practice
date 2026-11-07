@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chord transition trainer</title>
+<style>
+:root{--bg:#101218;--panel:#181b24;--raised:#232736;--line:#333a4d;--fg:#e6e8ee;--dim:#8089a0;--acc:#5eead4;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;display:flex;flex-wrap:wrap;gap:16px;padding:16px;justify-content:center;align-items:flex-start}
+canvas{background:var(--panel);border-radius:6px;display:block;max-width:100%}
+#hud{display:grid;grid-template-columns:repeat(3,1fr);gap:2px 8px;margin-bottom:6px;font-variant-numeric:tabular-nums;color:var(--dim)}
+#hud b{color:var(--fg);font-weight:600}
+#side{width:340px;max-width:100%;display:flex;flex-direction:column;gap:12px}
+.box{background:var(--panel);border-radius:6px;padding:12px}
+h1{font-size:16px;margin:0 0 4px}
+p.sub{margin:0;color:var(--dim);font-size:12px}
+label{display:block;color:var(--dim);font-size:12px;margin:8px 0 3px}
+input,select,textarea,button{font:inherit;color:var(--fg);background:var(--raised);border:1px solid var(--line);border-radius:4px;padding:5px 8px}
+input[type=range]{width:100%;padding:0}
+textarea{width:100%;font-family:ui-monospace,Consolas,monospace;resize:vertical}
+button{cursor:pointer}
+button:hover,button:focus-visible{border-color:var(--acc);outline:none}
+button.go{background:var(--acc);color:#04302b;font-weight:600;width:100%;padding:9px;margin-top:10px;border:0}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.presets{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.presets button{font-size:12px;padding:2px 7px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:3px 4px}
+th:first-child,td:first-child{text-align:left;font-family:ui-monospace,Consolas,monospace}
+th{color:var(--dim);font-weight:500;border-bottom:1px solid var(--line)}
+td.bad{color:var(--bad)}
+#msg{color:var(--bad);font-size:12px;min-height:16px;margin-top:6px}
+[hidden]{display:none!important}
+#tabs{width:100%;display:flex;gap:6px;justify-content:center}
+#tabs button.on{background:var(--acc);color:#04302b;border-color:var(--acc);font-weight:600}
+#train{display:flex;flex-wrap:wrap;gap:16px;justify-content:center;align-items:flex-start;width:100%}
+#stats{width:min(920px,100%)}
+#stats table{font-size:14px}
+#stats th,#stats td{padding:7px 8px}
+#sum{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:14px;color:var(--dim)}
+#sum b{display:block;font-size:22px;color:var(--fg);font-weight:600}
+.heat{display:inline-block;height:6px;border-radius:3px;background:var(--bad);vertical-align:middle}
+</style>
+</head>
+<body>
+<div id="tabs"><button id="tabT" class="on">Train</button><button id="tabS">Stats</button></div>
+<div id="train">
+<div>
+  <div id="hud"><span id="a1"></span><span id="a2"></span><span id="a3"></span><span id="s1"></span><span id="s2"></span><span id="s3"></span></div>
+  <canvas id="cv" width="360" height="560"></canvas>
+</div>
+
+<div id="side">
+  <div class="box">
+    <h1>Chord transition trainer</h1>
+    <p class="sub">Loop a chord sequence, find which transitions break. Lanes: D F J K. Esc stops.</p>
+
+    <label for="pat">Pattern (space-separated chords, <code>-</code> is a rest)</label>
+    <textarea id="pat" rows="2" spellcheck="false">DF FJ JK FJ</textarea>
+    <div class="presets" id="presets"></div>
+
+    <div class="row">
+      <div>
+        <label for="mode">Mode</label>
+        <select id="mode">
+          <option value="fall">Timed (falling notes)</option>
+          <option value="wait">Self-paced (waits for you)</option>
+        </select>
+      </div>
+      <div>
+        <label for="sub">Subdivision</label>
+        <select id="sub">
+          <option value="1">1/4</option>
+          <option value="2" selected>1/8</option>
+          <option value="4">1/16</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="bpm">BPM: <span id="bpmv">120</span> &nbsp;(<span id="cps"></span> chords/s)</label>
+    <input type="range" id="bpm" min="60" max="240" value="120">
+    <label><input type="checkbox" id="met" checked style="width:auto"> Metronome click (timed mode)</label>
+    <label for="lag">Audio offset: <span id="lagv">0</span> ms (click plays earlier, compensates headphone lag)</label>
+    <input type="range" id="lag" min="0" max="400" step="5" value="0">
+    <label for="dur">Session length</label>
+    <select id="dur">
+      <option value="0">Stopwatch (no limit)</option>
+      <option value="60">1 min countdown</option>
+      <option value="120">2 min countdown</option>
+      <option value="300">5 min countdown</option>
+    </select>
+
+    <button class="go" id="go">Start</button>
+    <div id="msg"></div>
+  </div>
+
+</div>
+</div>
+
+<div id="stats" class="box" hidden>
+  <div id="sum"></div>
+  <table><thead><tr id="thead"></tr></thead><tbody id="tbody"></tbody></table>
+  <p class="sub" id="hint" style="margin-top:10px"></p>
+</div>
+
+<script>
+'use strict';
+const KEYS = ['d', 'f', 'j', 'k'];            // lane keys, edit to remap
+const COLORS = ['#60a5fa', '#34d399', '#fbbf24', '#f472b6'];
+const BAD = '#f87171';
+const PRESETS = {
+  'Stairs': 'DF FJ JK FJ',
+  'Wide jump': 'DF JK',
+  'Split': 'DJ FK',
+  'Outer/inner': 'DK FJ',
+  'Roll + jack': 'DF DF FJ FJ JK JK',
+  'Triples': 'DFJ FJK DFJ FJK',
+  'Mixed': 'D F J K DF FJ JK DK'
+};
+const WIN = 0.14;            // hit window, seconds
+const APPROACH = 1.5;        // seconds a note takes to fall in timed mode
+
+const $ = id => document.getElementById(id);
+const cv = $('cv'), cx = cv.getContext('2d');
+const W = cv.width, H = cv.height, LW = W / 4, HIT = H - 90;
+const SPEED = (HIT + 30) / APPROACH;
+
+let pattern = [], n = 0, mode = 'fall', running = false;
+let t0 = 0, step = 0.25, sub = 2, ac = null, clickI = 0, missPtr = 0, ns = {};
+let cur = 0, pressedSince = new Set(), lastDone = 0, recent = [];
+let held = new Set(), flash = [0, 0, 0, 0], verdict = null;
+let stats = {}, hud = { hit: 0, miss: 0, combo: 0, best: 0, errs: 0, score: 0, time: 0 }, sessLen = 0;
+
+/* ---------- pattern ---------- */
+function parse() {
+  pattern = $('pat').value.toLowerCase().split(/[\s,]+/).filter(Boolean).map(tok => {
+    const lanes = tok === '-' ? [] :
+      [...new Set([...tok].map(c => KEYS.indexOf(c)).filter(i => i >= 0))].sort();
+    return { lanes, name: lanes.map(i => KEYS[i].toUpperCase()).join('') || '-' };
+  });
+  n = pattern.length;
+  return pattern.some(p => p.lanes.length);
+}
+const trans = i => pattern[(((i - 1) % n) + n) % n].name + '\u2192' + pattern[i % n].name;
+const hitT = i => t0 + i * step;
+const getN = i => ns[i] || (ns[i] = { t: {}, done: false, missed: false });
+
+/* ---------- stats ---------- */
+function rec(k, miss, v, sg) {
+  const s = stats[k] || (stats[k] = { n: 0, miss: 0, sum: 0, sg: 0, min: Infinity });
+  if (miss) s.miss++; else { s.n++; s.sum += v; s.sg += sg || 0; s.min = Math.min(s.min, v); }
+}
+function fmt(x) { x = Math.max(0, x); return Math.floor(x / 60) + ':' + String(Math.floor(x % 60)).padStart(2, '0'); }
+function renderStats() {
+  const fall = mode === 'fall', h = hud;
+  const acc = h.hit / ((h.hit + (fall ? h.miss : h.errs)) || 1);
+  $('sum').innerHTML = [['score', h.score], ['best combo', h.best], ['clean', (100 * acc).toFixed(1) + '%'],
+    ['chords', h.hit], ['time', fmt(h.time || 0)]].map(([k, v]) => '<span>' + k + '<b>' + v + '</b></span>').join('');
+  $('thead').innerHTML = '<th>transition</th><th>clean</th><th>ok</th><th>' + (fall ? 'miss' : 'wrong') + '</th><th>' +
+    (fall ? 'avg |err| ms' : 'avg ms') + '</th><th>best ms</th>' + (fall ? '<th>bias ms</th>' : '') + '<th></th>';
+  const rows = Object.entries(stats).map(([k, s]) => {
+    const avg = s.n ? s.sum / s.n : 0, rate = s.miss / (s.n + s.miss || 1);
+    return { k, s, avg, rate, bias: s.n ? s.sg / s.n : 0, bad: rate * 1000 + avg * 1000 };
+  }).sort((x, y) => y.bad - x.bad);
+  const mx = Math.max(1, ...rows.map(r => r.bad));
+  $('tbody').innerHTML = rows.map(r => '<tr><td>' + r.k + '</td><td>' + Math.round(100 * (1 - r.rate)) + '%</td><td>' + r.s.n +
+    '</td><td class="' + (r.s.miss ? 'bad' : '') + '">' + r.s.miss + '</td><td>' + Math.round(r.avg * 1000) + '</td><td>' +
+    (r.s.n ? Math.round(r.s.min * 1000) : '-') + '</td>' +
+    (fall ? '<td>' + (r.bias >= 0 ? '+' : '') + Math.round(r.bias * 1000) + '</td>' : '') +
+    '<td style="width:90px"><span class="heat" style="width:' + Math.round(80 * r.bad / mx) + 'px"></span></td></tr>').join('') ||
+    '<tr><td colspan="8">No data yet. Run a session first.</td></tr>';
+  $('hint').textContent = (fall ? 'Bias: negative = early, positive = late. ' : 'Time between completed chords; wrong = wrong key while this transition was pending. ') +
+    'Rows are sorted worst first; the bar shows relative difficulty.';
+}
+
+/* ---------- audio ---------- */
+function click(at, accent) {
+  if (!ac || !$('met').checked) return;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.value = accent ? 1500 : 1000;
+  at = Math.max(at, ac.currentTime);
+  g.gain.setValueAtTime(0.15, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + 0.04);
+  o.connect(g).connect(ac.destination);
+  o.start(at); o.stop(at + 0.05);
+}
+
+/* ---------- game logic ---------- */
+function judge(txt, sub2, color) { verdict = { txt, sub: sub2, color, until: performance.now() / 1000 + 0.5 }; }
+function stray(l) {
+  flash[l] = performance.now() / 1000 + 0.15;
+  hud.combo = 0; hud.errs++;
+}
+
+function addScore(b) { hud.score += Math.round(b * (1 + Math.min(Math.floor(hud.combo / 10), 10) * 0.1)); }
+
+function finish(i, s, p) {
+  s.done = true;
+  const e = p.lanes.reduce((a, l) => a + s.t[l] - hitT(i), 0) / p.lanes.length;
+  const a = Math.abs(e);
+  rec(trans(i), false, a, e);
+  hud.hit++; hud.combo++; hud.best = Math.max(hud.best, hud.combo);
+  addScore(a < 0.05 ? 300 : a < 0.09 ? 200 : 100);
+  judge(a < 0.05 ? 'PERFECT' : a < 0.09 ? 'GREAT' : 'GOOD',
+        (e >= 0 ? '+' : '') + Math.round(e * 1000) + ' ms',
+        a < 0.05 ? '#5eead4' : a < 0.09 ? '#a3e635' : '#fbbf24');
+}
+
+function pressFall(lane, t) {
+  const i0 = Math.max(missPtr, Math.ceil((t - WIN - t0) / step));
+  for (let i = i0; hitT(i) - t <= WIN; i++) {
+    if (i < 0) continue;
+    const p = pattern[i % n];
+    if (!p.lanes.includes(lane)) continue;
+    const s = getN(i);
+    if (s.done || s.t[lane] !== undefined) continue;
+    s.t[lane] = t;
+    if (Object.keys(s.t).length === p.lanes.length) finish(i, s, p);
+    return;
+  }
+  stray(lane);
+}
+
+function skipRests() { while (!pattern[cur % n].lanes.length) cur++; }
+
+function pressWait(lane, t) {
+  const p = pattern[cur % n];
+  if (!p.lanes.includes(lane)) {
+    stray(lane);
+    rec(trans(cur), true);
+    return;
+  }
+  pressedSince.add(lane);
+  if (p.lanes.every(l => pressedSince.has(l))) {
+    if (lastDone) {
+      const dt = t - lastDone;
+      rec(trans(cur), false, dt, 0);
+      recent.push(dt); if (recent.length > 16) recent.shift();
+      hud.hit++; hud.combo++; hud.best = Math.max(hud.best, hud.combo);
+      addScore(dt <= step ? 300 : dt <= step * 1.25 ? 200 : 100);
+    }
+    lastDone = t; cur++; pressedSince.clear(); skipRests();
+  }
+}
+
+function updateFall(now) {
+  const beat = step * sub;
+  const lag = +$('lag').value / 1000;
+  while (t0 + clickI * beat - lag < now + 0.1) {
+    click(ac.currentTime + (t0 + clickI * beat - lag - now), clickI % 4 === 0);
+    clickI++;
+  }
+  while (hitT(missPtr) + WIN < now) {
+    const i = missPtr++, p = pattern[i % n], s = getN(i);
+    if (p.lanes.length && !s.done) {
+      s.done = s.missed = true;
+      hud.miss++; hud.combo = 0;
+      rec(trans(i), true);
+      judge('MISS', '', BAD);
+    }
+  }
+}
+
+/* ---------- drawing ---------- */
+function drawBase(now) {
+  cx.clearRect(0, 0, W, H);
+  for (let l = 0; l < 4; l++) {
+    if (held.has(l)) { cx.fillStyle = COLORS[l] + '30'; cx.fillRect(l * LW, 0, LW, H); }
+    if (flash[l] > now) { cx.fillStyle = BAD + '40'; cx.fillRect(l * LW, 0, LW, H); }
+    if (l) { cx.fillStyle = '#2a3042'; cx.fillRect(l * LW, 0, 1, H); }
+  }
+  cx.fillStyle = '#4b5470'; cx.fillRect(0, HIT, W, 2);
+  cx.font = '600 20px system-ui'; cx.textAlign = 'center';
+  for (let l = 0; l < 4; l++) {
+    cx.fillStyle = held.has(l) ? COLORS[l] : '#6b7490';
+    cx.fillText(KEYS[l].toUpperCase(), l * LW + LW / 2, H - 38);
+  }
+}
+function block(l, y, h, color, alpha) {
+  cx.globalAlpha = alpha;
+  cx.fillStyle = color;
+  cx.fillRect(l * LW + 6, y - h / 2, LW - 12, h);
+  cx.globalAlpha = 1;
+}
+function drawVerdict(now) {
+  if (!verdict || verdict.until < now) return;
+  cx.textAlign = 'center';
+  cx.fillStyle = verdict.color;
+  cx.font = '700 22px system-ui'; cx.fillText(verdict.txt, W / 2, H / 2 - 40);
+  cx.font = '14px system-ui'; cx.fillText(verdict.sub, W / 2, H / 2 - 18);
+}
+
+function draw(now) {
+  drawBase(now);
+  if (mode === 'fall') {
+    const h = Math.max(6, Math.min(26, step * SPEED - 4));
+    const a = Math.floor((now - t0) / step) - 3, b = Math.ceil((now + APPROACH - t0) / step);
+    for (let i = Math.max(0, a); i <= b; i++) {
+      const p = pattern[i % n], s = ns[i] || { t: {} };
+      if (!p.lanes.length || (s.done && !s.missed)) continue;
+      const y = HIT - (hitT(i) - now) * SPEED;
+      for (const l of p.lanes) if (s.t[l] === undefined) block(l, y, h, s.missed ? '#4b5470' : COLORS[l], 1);
+    }
+  } else {
+    for (let k = 0, i = cur; k < 9; i++) {
+      const p = pattern[i % n];
+      if (!p.lanes.length) continue;
+      const y = HIT - k * 56;
+      for (const l of p.lanes) {
+        if (k === 0 && pressedSince.has(l)) continue;
+        block(l, y, 26, COLORS[l], 1 - k * 0.09);
+      }
+      k++;
+    }
+  }
+  drawVerdict(now);
+}
+
+function drawIdle(msg) {
+  drawBase(performance.now() / 1000);
+  cx.fillStyle = '#6b7490'; cx.font = '14px system-ui'; cx.textAlign = 'center';
+  cx.fillText(msg || 'Press Start', W / 2, H / 2);
+}
+
+function updateHud(now) {
+  const el = now - t0;
+  $('a1').innerHTML = 'time <b>' + (el < 0 ? 'ready' : fmt(sessLen ? sessLen - el : el)) + '</b>';
+  $('a2').innerHTML = 'score <b>' + hud.score + '</b>';
+  $('a3').innerHTML = 'combo <b>' + hud.combo + '</b>';
+  if (mode === 'fall') {
+    const tot = hud.hit + hud.miss;
+    $('s1').innerHTML = 'acc <b>' + (tot ? (100 * hud.hit / tot).toFixed(1) : '--') + '%</b>';
+    $('s2').innerHTML = 'best <b>' + hud.best + '</b>';
+    $('s3').innerHTML = 'misses <b>' + hud.miss + '</b>';
+  } else {
+    const avg = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
+    $('s1').innerHTML = 'last 16 <b>' + (avg ? Math.round(avg * 1000) + ' ms' : '--') + '</b>';
+    $('s2').innerHTML = 'target <b>' + Math.round(step * 1000) + ' ms</b>';
+    $('s3').innerHTML = 'wrong keys <b>' + hud.errs + '</b>';
+  }
+}
+
+function frame() {
+  if (!running) return;
+  const now = performance.now() / 1000;
+  if (mode === 'fall') updateFall(now);
+  draw(now);
+  updateHud(now);
+  if (sessLen && now - t0 >= sessLen) { stop(true); return; }
+  requestAnimationFrame(frame);
+}
+
+/* ---------- control ---------- */
+function start() {
+  if (!parse()) {
+    $('msg').textContent = 'Pattern needs at least one chord using ' + KEYS.join('').toUpperCase() + '.';
+    return;
+  }
+  $('msg').textContent = '';
+  ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+  ac.resume();
+  mode = $('mode').value; sub = +$('sub').value;
+  step = 60 / +$('bpm').value / sub;
+  ns = {}; stats = {}; recent = []; pressedSince.clear();
+  hud = { hit: 0, miss: 0, combo: 0, best: 0, errs: 0, score: 0, time: 0 };
+  sessLen = +$('dur').value;
+  cur = 0; lastDone = 0; missPtr = 0; clickI = -4; verdict = null;
+  if (mode === 'wait') skipRests();
+  t0 = performance.now() / 1000 + (mode === 'fall' ? 4 * step * sub + +$('lag').value / 1000 : 0);
+  running = true;
+  $('go').textContent = 'Stop (Esc)';
+  document.activeElement.blur();
+  requestAnimationFrame(frame);
+}
+function stop(done) {
+  running = false;
+  const el = Math.max(0, performance.now() / 1000 - t0);
+  hud.time = sessLen ? Math.min(sessLen, el) : el;
+  $('go').textContent = 'Start';
+  renderStats();
+  drawIdle(done ? 'Time up: ' + hud.score + ' pts' : 'Press Start');
+  if (done) showTab('stats');
+}
+function showTab(t) {
+  if (t === 'stats' && running) stop();
+  $('train').hidden = t === 'stats';
+  $('stats').hidden = t !== 'stats';
+  $('tabT').classList.toggle('on', t === 'train');
+  $('tabS').classList.toggle('on', t === 'stats');
+  if (t === 'stats') renderStats();
+}
+
+addEventListener('keydown', e => {
+  if (!running) return;
+  if (e.key === 'Escape') { stop(); return; }
+  if (e.repeat) return;
+  const l = KEYS.indexOf(e.key.toLowerCase());
+  if (l < 0) return;
+  e.preventDefault();
+  held.add(l);
+  const t = e.timeStamp / 1000;
+  if (mode === 'fall') pressFall(l, t); else pressWait(l, t);
+});
+addEventListener('keyup', e => held.delete(KEYS.indexOf(e.key.toLowerCase())));
+addEventListener('blur', () => held.clear());
+
+$('go').onclick = () => running ? stop() : start();
+function syncBpm() {
+  const b = +$('bpm').value;
+  $('bpmv').textContent = b;
+  $('cps').textContent = (b * +$('sub').value / 60).toFixed(1);
+}
+$('bpm').oninput = $('sub').onchange = syncBpm;
+for (const [name, pat] of Object.entries(PRESETS)) {
+  const b = document.createElement('button');
+  b.textContent = name; b.title = pat;
+  b.onclick = () => { $('pat').value = pat; };
+  $('presets').appendChild(b);
+}
+$('tabT').onclick = () => showTab('train');
+$('tabS').onclick = () => showTab('stats');
+try { $('lag').value = localStorage.getItem('lag') || 0; } catch (e) {}
+$('lag').oninput = () => {
+  $('lagv').textContent = $('lag').value;
+  try { localStorage.setItem('lag', $('lag').value); } catch (e) {}
+};
+$('lagv').textContent = $('lag').value;
+syncBpm(); drawIdle();
+</script>
+</body>
+</html>
